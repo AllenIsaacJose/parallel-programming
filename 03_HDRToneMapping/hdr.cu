@@ -1,3 +1,5 @@
+%%cuda --name student_func.cu
+
 /* Udacity Homework 3
    HDR Tone-mapping
 
@@ -6,7 +8,7 @@
 
   A High Dynamic Range (HDR) image contains a wider variation of intensity
   and color than is allowed by the RGB format with 1 byte per channel that we
-  have used in the previous assignment.  
+  have used in the previous assignment.
 
   To store this extra information we use single precision floating point for
   each channel.  This allows for an extremely wide range of intensity values.
@@ -53,7 +55,7 @@
   Old TV signals used to be transmitted in this way so that black & white
   televisions could display the luminance channel while color televisions would
   display all three of the channels.
-  
+
 
   Tone-mapping
   ============
@@ -79,14 +81,24 @@
 
 */
 
-
-#include "reference_calc.cpp"
 #include "utils.h"
+
+#include <stdio.h>
+#include <float.h>
+#include <limits.h>
+
+__device__ float _min(float a, float b) {
+	return a < b ? a : b;
+}
+
+__device__ float _max(float a, float b) {
+	return a > b ? a : b;
+}
 
 __global__
 void findMinMaxLogLumPerBlock(const float* const d_logLuminance,
 		const size_t numRows, const size_t numCols, 
-		float d_minLogLum, float d_maxLogLum)
+		float* d_minLogLum, float* d_maxLogLum)
 {
   unsigned int i = (blockIdx.x * blockDim.x) + threadIdx.x;
   unsigned int j = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -96,34 +108,34 @@ void findMinMaxLogLumPerBlock(const float* const d_logLuminance,
 
   unsigned int g_oneDOffset = j * numCols + i;
   unsigned int s_oneDOffset = threadIdx.y * blockDim.x + threadIdx.x;
-  unsigned int threadsPerBlock = blockDim.x * blockDim.y;
-  __shared__ float s_minLogLum[threadsPerBlock];
-  __shared__ float s_maxLogLum[threadsPerBlock];
+  const unsigned int threadsPerBlock = blockDim.x * blockDim.y;
 
-  s_minLogLum[s_oneDOffset] = d_logLuminance[g_oneDOffset];
-  s_maxLogLum[s_oneDOffset] = d_logLuminance[g_oneDOffset];
+  extern __shared__ float s_minMaxLogLum[];
+
+  s_minMaxLogLum[s_oneDOffset] = d_logLuminance[g_oneDOffset];
+  s_minMaxLogLum[threadsPerBlock + s_oneDOffset] = d_logLuminance[g_oneDOffset];
   __syncthreads();
 
   for (size_t it = threadsPerBlock / 2; it > 0; it >>= 1)
   {
     if (s_oneDOffset < it)
-      s_minLogLum[s_oneDOffset] = min(s_minLogLum[s_oneDOffset], s_minLogLum[s_oneDOffset + it]);
+      s_minMaxLogLum[s_oneDOffset] = min(s_minMaxLogLum[s_oneDOffset], s_minMaxLogLum[s_oneDOffset + it]);
     __syncthreads();
   }
 
   if(s_oneDOffset == 0)
-    d_minLogLum[blockIdx.y * gridDim.x + blockIdx.x] = s_minLogLum[0];
+    d_minLogLum[blockIdx.y * gridDim.x + blockIdx.x] = s_minMaxLogLum[0];
   __syncthreads();
   
   for (size_t it = threadsPerBlock / 2; it > 0; it >>= 1)
   {
     if (s_oneDOffset < it)
-      s_maxLogLum[s_oneDOffset] = max(s_maxLogLum[s_oneDOffset], s_maxLogLum[s_oneDOffset + it]);
+      s_minMaxLogLum[threadsPerBlock + s_oneDOffset] = max(s_minMaxLogLum[threadsPerBlock + s_oneDOffset], s_minMaxLogLum[threadsPerBlock + s_oneDOffset + it]);
     __syncthreads();
   }
 
   if(s_oneDOffset == 0)
-    d_maxLogLum[blockIdx.y * gridDim.x + blockIdx.x] = s_maxLogLum[0];
+    d_maxLogLum[blockIdx.y * gridDim.x + blockIdx.x] = s_minMaxLogLum[threadsPerBlock];
 }
 
 __global__
@@ -139,35 +151,35 @@ void reduceMinMaxLumPerBlock(float* const d_minLogLumArray,
   if (i >= (numCols * numRows))
     return;
 
-  unsigned int threadsPerBlock = numRows * numCols;
-  __shared__ float s_minLogLumArray[threadsPerBlock];
-  __shared__ float s_maxLogLumArray[threadsPerBlock];
+  const unsigned int blocksPerGrid = numRows * numCols;
 
-  s_minLogLumArray[i] = d_minLogLumArray[i];
-  s_maxLogLumArray[i] = d_maxLogLumArray[i];
+  extern __shared__ float s_minMaxLogLumArray[];
+
+  s_minMaxLogLumArray[i] = d_minLogLumArray[i];
+  s_minMaxLogLumArray[i + blocksPerGrid] = d_maxLogLumArray[i];
   __syncthreads();
 
-  for (size_t it = threadsPerBlock / 2; it > 0; it >>= 1)
+  for (size_t it = blocksPerGrid / 2; it > 0; it >>= 1)
   {
     if (i < it)
-      s_minLogLumArray[i] = max(s_minLogLumArray[i], s_minLogLumArray[i + it]);
+      s_minMaxLogLumArray[i] = min(s_minMaxLogLumArray[i], s_minMaxLogLumArray[i + it]);
     __syncthreads();
   }
 
   if(i == 0)
-    *d_minLogLum = s_minLogLumArray[0];
+    *d_minLogLum = s_minMaxLogLumArray[0];
  
   __syncthreads();
 
-  for (size_t it = threadsPerBlock / 2; it > 0; it >>= 1)
+  for (size_t it = blocksPerGrid / 2; it > 0; it >>= 1)
   {
     if (i < it)
-      s_maxLogLumArray[i] = max(s_maxLogLumArray[i], s_maxLogLumArray[i + it]);
+      s_minMaxLogLumArray[i + blocksPerGrid] = max(s_minMaxLogLumArray[i + blocksPerGrid], s_minMaxLogLumArray[i + blocksPerGrid + it]);
     __syncthreads();
   }
 
   if(i == 0)
-    *d_maxLogLum = s_maxLogLumArray[0];
+    *d_maxLogLum = s_minMaxLogLumArray[blocksPerGrid];
 
 }
 
@@ -195,34 +207,39 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   float* d_maxLogLumPtr = nullptr;
 
   // Number of threads per block (32 * 32)
-  unsigned int threads = 32;
+  const unsigned int threads = 32;
 
   // Number of blocks per grid
   unsigned int blocksX = (numCols + threads - 1) / threads;
   unsigned int blocksY = (numRows + threads - 1) / threads;
 
   // Allocate memory for min and max logLum
-  checkCudaErrors(cudaMalloc(&d_minLogLumPtr, sizeof(float) * blockX * blockY);
-  checkCudaErrors(cudaMalloc(&d_maxLogLumPtr, sizeof(float) * blockX * blockY);
-  checkCudaErrors(cudaMemset(d_minLogLumPtr, 0, sizeof(float) * blockX * blockY);
-  checkCudaErrors(cudaMemset(d_maxLogLumPtr, 0, sizeof(float) * blockX * blockY);
+  checkCudaErrors(cudaMalloc(&d_minLogLumPtr, sizeof(float) * blocksX * blocksY));
+  checkCudaErrors(cudaMalloc(&d_maxLogLumPtr, sizeof(float) * blocksX * blocksY));
+  checkCudaErrors(cudaMemset(d_minLogLumPtr, 0, sizeof(float) * blocksX * blocksY));
+  checkCudaErrors(cudaMemset(d_maxLogLumPtr, 0, sizeof(float) * blocksX * blocksY));
 
   dim3 threadsPerBlock(threads, threads, 1);
-  dim3 blocksPerGrid((blocksX, blockY, 1);
+  dim3 blocksPerGrid(blocksX, blocksY, 1);
 
-  findMinMaxLogLumPerBlock<<<blocksPerGrid, threadsPerBlock>>>(d_logLuminance,
+  const unsigned int numThreadsPerBlock = threads * threads;
+  findMinMaxLogLumPerBlock<<<blocksPerGrid, threadsPerBlock, 2*numThreadsPerBlock*sizeof(float)>>>(d_logLuminance,
                         numRows, numCols, d_minLogLumPtr, d_maxLogLumPtr);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
   float* d_minLogLum = nullptr;
   float* d_maxLogLum = nullptr;
-  checkCudaErrors(cudaMalloc(&d_minLogLum, sizeof(float));
-  checkCudaErrors(cudaMalloc(&d_maxLogLum, sizeof(float));
-  checkCudaErrors(cudaMemset(d_minLogLum, 0, sizeof(float));
-  checkCudaErrors(cudaMemset(d_maxLogLumP, 0, sizeof(float));
-  reduceMinMaxLumPerBlock<<<1,blocksX*blocksY>>>(d_minLogLumPtr, d_maxLogLumPtr, blocksX, blockY, d_minLogLum, d_maxLogLum);
+  checkCudaErrors(cudaMalloc(&d_minLogLum, sizeof(float)));
+  checkCudaErrors(cudaMalloc(&d_maxLogLum, sizeof(float)));
+  checkCudaErrors(cudaMemset(d_minLogLum, 0, sizeof(float)));
+  checkCudaErrors(cudaMemset(d_maxLogLum, 0, sizeof(float)));
+
+  const unsigned int numblocksPerGrid = blocksY * blocksX;
+  reduceMinMaxLumPerBlock<<<1,blocksX*blocksY,2*numblocksPerGrid*sizeof(float)>>>(d_minLogLumPtr, d_maxLogLumPtr, blocksY, blocksX, d_minLogLum, d_maxLogLum);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
   checkCudaErrors(cudaMemcpy(&min_logLum, d_minLogLum, sizeof(float), cudaMemcpyDeviceToHost));
   checkCudaErrors(cudaMemcpy(&max_logLum, d_maxLogLum, sizeof(float), cudaMemcpyDeviceToHost));
+
+  printf("%f %f\n", min_logLum, max_logLum);
 }
