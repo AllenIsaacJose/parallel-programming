@@ -97,7 +97,7 @@ __device__ float _max(float a, float b) {
 
 __global__
 void findMinMaxLogLumPerBlock(const float* const d_logLuminance,
-		const size_t numRows, const size_t numCols, 
+		const size_t numRows, const size_t numCols,
 		float* d_minLogLum, float* d_maxLogLum)
 {
   unsigned int i = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -119,23 +119,27 @@ void findMinMaxLogLumPerBlock(const float* const d_logLuminance,
   for (size_t it = threadsPerBlock / 2; it > 0; it >>= 1)
   {
     if (s_oneDOffset < it)
-      s_minMaxLogLum[s_oneDOffset] = min(s_minMaxLogLum[s_oneDOffset], s_minMaxLogLum[s_oneDOffset + it]);
+      s_minMaxLogLum[s_oneDOffset] = min(s_minMaxLogLum[s_oneDOffset],
+                                             s_minMaxLogLum[s_oneDOffset + it]);
     __syncthreads();
   }
 
   if(s_oneDOffset == 0)
     d_minLogLum[blockIdx.y * gridDim.x + blockIdx.x] = s_minMaxLogLum[0];
   __syncthreads();
-  
+
   for (size_t it = threadsPerBlock / 2; it > 0; it >>= 1)
   {
     if (s_oneDOffset < it)
-      s_minMaxLogLum[threadsPerBlock + s_oneDOffset] = max(s_minMaxLogLum[threadsPerBlock + s_oneDOffset], s_minMaxLogLum[threadsPerBlock + s_oneDOffset + it]);
+      s_minMaxLogLum[threadsPerBlock + s_oneDOffset] =
+                           max(s_minMaxLogLum[threadsPerBlock + s_oneDOffset],
+                           s_minMaxLogLum[threadsPerBlock + s_oneDOffset + it]);
     __syncthreads();
   }
 
   if(s_oneDOffset == 0)
-    d_maxLogLum[blockIdx.y * gridDim.x + blockIdx.x] = s_minMaxLogLum[threadsPerBlock];
+    d_maxLogLum[blockIdx.y * gridDim.x + blockIdx.x] =
+                                                s_minMaxLogLum[threadsPerBlock];
 }
 
 __global__
@@ -162,24 +166,52 @@ void reduceMinMaxLumPerBlock(float* const d_minLogLumArray,
   for (size_t it = blocksPerGrid / 2; it > 0; it >>= 1)
   {
     if (i < it)
-      s_minMaxLogLumArray[i] = min(s_minMaxLogLumArray[i], s_minMaxLogLumArray[i + it]);
+      s_minMaxLogLumArray[i] = min(s_minMaxLogLumArray[i],
+                                                   s_minMaxLogLumArray[i + it]);
     __syncthreads();
   }
 
   if(i == 0)
     *d_minLogLum = s_minMaxLogLumArray[0];
- 
+
   __syncthreads();
 
   for (size_t it = blocksPerGrid / 2; it > 0; it >>= 1)
   {
     if (i < it)
-      s_minMaxLogLumArray[i + blocksPerGrid] = max(s_minMaxLogLumArray[i + blocksPerGrid], s_minMaxLogLumArray[i + blocksPerGrid + it]);
+      s_minMaxLogLumArray[i + blocksPerGrid] =
+                                   max(s_minMaxLogLumArray[i + blocksPerGrid],
+                                   s_minMaxLogLumArray[i + blocksPerGrid + it]);
     __syncthreads();
   }
 
   if(i == 0)
     *d_maxLogLum = s_minMaxLogLumArray[blocksPerGrid];
+
+}
+
+__global__
+void calculateHisto(const float* const d_logLuminance,
+                    const size_t numRows,
+                    const size_t numCols,
+                    const size_t numBins,
+                    float* d_minLogLum,
+                    float* d_rangeLogLum,
+                    unsigned int* d_histo)
+{
+  unsigned int i = (blockIdx.x * blockDim.x) + threadIdx.x;
+  unsigned int j = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+  if (i >= numCols || j >= numRows)
+    return;
+
+  unsigned int g_oneDOffset = j * numCols + i;
+
+  unsigned int binNum = min(static_cast<unsigned int>(numBins - 1),
+                        static_cast<unsigned int>(((d_logLuminance[g_oneDOffset]
+                              - (*d_minLogLum)) / (*d_rangeLogLum)) * numBins));
+
+  atomicAdd(&(d_histo[binNum]), 1);
 
 }
 
@@ -214,17 +246,22 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   unsigned int blocksY = (numRows + threads - 1) / threads;
 
   // Allocate memory for min and max logLum
-  checkCudaErrors(cudaMalloc(&d_minLogLumPtr, sizeof(float) * blocksX * blocksY));
-  checkCudaErrors(cudaMalloc(&d_maxLogLumPtr, sizeof(float) * blocksX * blocksY));
-  checkCudaErrors(cudaMemset(d_minLogLumPtr, 0, sizeof(float) * blocksX * blocksY));
-  checkCudaErrors(cudaMemset(d_maxLogLumPtr, 0, sizeof(float) * blocksX * blocksY));
+  checkCudaErrors(cudaMalloc(&d_minLogLumPtr,
+                                            sizeof(float) * blocksX * blocksY));
+  checkCudaErrors(cudaMalloc(&d_maxLogLumPtr,
+                                            sizeof(float) * blocksX * blocksY));
+  checkCudaErrors(cudaMemset(d_minLogLumPtr, 0,
+                                            sizeof(float) * blocksX * blocksY));
+  checkCudaErrors(cudaMemset(d_maxLogLumPtr, 0,
+                                            sizeof(float) * blocksX * blocksY));
 
   dim3 threadsPerBlock(threads, threads, 1);
   dim3 blocksPerGrid(blocksX, blocksY, 1);
 
   const unsigned int numThreadsPerBlock = threads * threads;
-  findMinMaxLogLumPerBlock<<<blocksPerGrid, threadsPerBlock, 2*numThreadsPerBlock*sizeof(float)>>>(d_logLuminance,
-                        numRows, numCols, d_minLogLumPtr, d_maxLogLumPtr);
+  findMinMaxLogLumPerBlock<<<blocksPerGrid, threadsPerBlock, 2 *
+                           numThreadsPerBlock * sizeof(float)>>>(d_logLuminance,
+                              numRows, numCols, d_minLogLumPtr, d_maxLogLumPtr);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
   float* d_minLogLum = nullptr;
@@ -235,11 +272,36 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   checkCudaErrors(cudaMemset(d_maxLogLum, 0, sizeof(float)));
 
   const unsigned int numblocksPerGrid = blocksY * blocksX;
-  reduceMinMaxLumPerBlock<<<1,blocksX*blocksY,2*numblocksPerGrid*sizeof(float)>>>(d_minLogLumPtr, d_maxLogLumPtr, blocksY, blocksX, d_minLogLum, d_maxLogLum);
+  reduceMinMaxLumPerBlock<<<1, blocksX * blocksY, 2 * numblocksPerGrid *
+                               sizeof(float)>>>(d_minLogLumPtr, d_maxLogLumPtr,
+                                    blocksY, blocksX, d_minLogLum, d_maxLogLum);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-  checkCudaErrors(cudaMemcpy(&min_logLum, d_minLogLum, sizeof(float), cudaMemcpyDeviceToHost));
-  checkCudaErrors(cudaMemcpy(&max_logLum, d_maxLogLum, sizeof(float), cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemcpy(&min_logLum, d_minLogLum, sizeof(float),
+                                                       cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemcpy(&max_logLum, d_maxLogLum, sizeof(float),
+                                                       cudaMemcpyDeviceToHost));
+  printf("Minimum luminance = %f, Maxmimum luminance = %f\n", min_logLum, max_logLum);
 
-  printf("%f %f\n", min_logLum, max_logLum);
+  float range_logLum = max_logLum - min_logLum;
+  float* d_rangeLogLum = nullptr;
+  unsigned int* d_histo = nullptr;
+  checkCudaErrors(cudaMalloc(&d_rangeLogLum, sizeof(float)));
+  checkCudaErrors(cudaMalloc(&d_histo, numBins * sizeof(unsigned int)));
+  checkCudaErrors(cudaMemcpy(d_rangeLogLum, &range_logLum, sizeof(float),
+                                                       cudaMemcpyHostToDevice));
+  checkCudaErrors(cudaMemset(d_histo, 0, numBins * sizeof(unsigned int)));
+  calculateHisto<<<blocksPerGrid, threadsPerBlock>>>(d_logLuminance, numRows,
+                        numCols, numBins, d_minLogLum, d_rangeLogLum, d_histo);
+  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+  unsigned int histoGram[numBins];
+  checkCudaErrors(cudaMemcpy(&histoGram[0], d_histo, numBins *
+                                 sizeof(unsigned int), cudaMemcpyDeviceToHost));
+  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+  for(size_t i = 0; i < numBins; i++)
+  {
+    printf("Number of elements in bin %ld is %d\n", i, histoGram[i]);
+  }
 }
