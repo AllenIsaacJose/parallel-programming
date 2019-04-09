@@ -83,18 +83,6 @@
 
 #include "utils.h"
 
-#include <stdio.h>
-#include <float.h>
-#include <limits.h>
-
-__device__ float _min(float a, float b) {
-	return a < b ? a : b;
-}
-
-__device__ float _max(float a, float b) {
-	return a > b ? a : b;
-}
-
 __global__
 void findMinMaxLogLumPerBlock(const float* const d_logLuminance,
 		const size_t numRows, const size_t numCols,
