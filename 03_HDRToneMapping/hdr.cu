@@ -215,6 +215,39 @@ void calculateHisto(const float* const d_logLuminance,
 
 }
 
+__global__
+void hellisAndSteeleCDF(unsigned int* d_histo, const size_t numBins,
+                        unsigned int* d_cdf)
+{
+  extern __shared__ unsigned int temp[];
+	unsigned int g_oneDOffset = (blockIdx.x * blockDim.x) + threadIdx.x;
+  
+  if (g_oneDOffset >= numBins)
+    return;
+	
+  unsigned int pout = 0,pin=1;
+	
+  if(g_oneDOffset != 0)
+    temp[g_oneDOffset] = d_histo[g_oneDOffset-1]; //exclusive scan
+	else
+    temp[g_oneDOffset] = 0;
+  
+  __syncthreads();
+
+	for (size_t off = 1; off < numBins; off <<= 1) {
+		pout = 1 - pout;
+		pin = 1 - pout;
+		if (g_oneDOffset >= off)
+      temp[numBins * pout + g_oneDOffset] = temp[numBins * pin + g_oneDOffset]
+                                     + temp[numBins * pin + g_oneDOffset - off];
+		else
+      temp[numBins * pout + g_oneDOffset] = temp[numBins * pin + g_oneDOffset];
+		__syncthreads();
+	}
+	d_cdf[g_oneDOffset] = temp[pout * numBins + g_oneDOffset];
+
+}
+
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
                                   float &min_logLum,
@@ -281,8 +314,7 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                                        cudaMemcpyDeviceToHost));
   checkCudaErrors(cudaMemcpy(&max_logLum, d_maxLogLum, sizeof(float),
                                                        cudaMemcpyDeviceToHost));
-  printf("Minimum luminance = %f, Maxmimum luminance = %f\n", min_logLum, max_logLum);
-
+  
   float range_logLum = max_logLum - min_logLum;
   float* d_rangeLogLum = nullptr;
   unsigned int* d_histo = nullptr;
@@ -295,13 +327,19 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                         numCols, numBins, d_minLogLum, d_rangeLogLum, d_histo);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-  unsigned int histoGram[numBins];
-  checkCudaErrors(cudaMemcpy(&histoGram[0], d_histo, numBins *
-                                 sizeof(unsigned int), cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemset(d_cdf, 0, numBins * sizeof(unsigned int)));
+  unsigned int threadsPerBlockCDF = threads * threads;
+  unsigned int blocksPerGridCDF = (numBins + ((threads * threads) - 1)) / 
+                                                            (threads * threads);
+  hellisAndSteeleCDF<<<blocksPerGridCDF, threadsPerBlockCDF, 2 * numBins *
+                               sizeof(unsigned int)>>>(d_histo, numBins, d_cdf);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-  for(size_t i = 0; i < numBins; i++)
-  {
-    printf("Number of elements in bin %ld is %d\n", i, histoGram[i]);
-  }
+  // Free allocated memory
+  checkCudaErrors(cudaFree(d_minLogLumPtr));
+  checkCudaErrors(cudaFree(d_maxLogLumPtr));
+  checkCudaErrors(cudaFree(d_minLogLum));
+  checkCudaErrors(cudaFree(d_maxLogLum));
+  checkCudaErrors(cudaFree(d_rangeLogLum));
+  checkCudaErrors(cudaFree(d_histo));
 }
